@@ -12,10 +12,13 @@ import (
 func DetectContextsRobust(body string, smartCanary string) []ReflectionContext {
 	contexts := []ReflectionContext{}
 
-	// Pull out just the "Nucl3iXXXXXX" part (no special chars)
+	// Extract base canary for position finding
 	baseCanary := extractBaseCanary(smartCanary)
 
-	// Find all canary positions
+	// Find all canary positions using base canary
+	// We use baseCanary (not smartCanary) because special chars might be partially encoded
+	// Example: "xSs9K7j&lt;&gt;'" has encoded < and > but unencoded '
+	// This is still exploitable via the quote, so we must detect it
 	canaryPositions := findAllOccurrences(body, baseCanary)
 	if len(canaryPositions) == 0 {
 		return contexts
@@ -214,27 +217,52 @@ func analyzeJSContext(jsCode string, offset int) ContextType {
 
 	beforeCanary := jsCode[:offset]
 
-	// Count quotes to determine if we're in a string
-	singleQuotes := strings.Count(beforeCanary, "'")
-	doubleQuotes := strings.Count(beforeCanary, "\"")
-	backticks := strings.Count(beforeCanary, "`")
+	// Iterate through the code to track state
+	var (
+		inSingleQuote bool
+		inDoubleQuote bool
+		inBacktick    bool
+		isEscaped     bool
+	)
 
-	// Check for template strings
-	if backticks%2 == 1 {
+	for _, r := range beforeCanary {
+		if isEscaped {
+			isEscaped = false
+			continue
+		}
+
+		if r == '\\' {
+			isEscaped = true
+			continue
+		}
+
+		// Toggle state based on quotes, but only if we're not inside another quote type
+		switch r {
+		case '\'':
+			if !inDoubleQuote && !inBacktick {
+				inSingleQuote = !inSingleQuote
+			}
+		case '"':
+			if !inSingleQuote && !inBacktick {
+				inDoubleQuote = !inDoubleQuote
+			}
+		case '`':
+			if !inSingleQuote && !inDoubleQuote {
+				inBacktick = !inBacktick
+			}
+		}
+	}
+
+	if inBacktick {
 		return ContextScriptTemplateString
 	}
-
-	// Check for single-quoted strings
-	if singleQuotes%2 == 1 {
+	if inSingleQuote {
 		return ContextScriptStringSingle
 	}
-
-	// Check for double-quoted strings
-	if doubleQuotes%2 == 1 {
+	if inDoubleQuote {
 		return ContextScriptStringDouble
 	}
 
-	// Not in a string, must be in code
 	return ContextScriptCode
 }
 
@@ -297,33 +325,117 @@ func detectQuoteChar(body string, canaryPos int) rune {
 // detectFilters checks which special characters survived in the reflection
 // This determines what filter bypasses are possible and overall exploitability
 func detectFilters(body string, canaryPos int, smartCanary string) FilterBypassInfo {
-	// Find the reflected region - search for a larger snippet around the canary
-	// to account for HTML encoding which can change the length
-	searchEnd := canaryPos + len(smartCanary) + 50 // Extra buffer for HTML entities
+	var (
+		angleBracketsAllowed bool
+		singleQuoteAllowed   bool
+		doubleQuoteAllowed   bool
+	)
+
+	// Find the reflected region - limit search to avoid picking up HTML structure
+	// Buffer accounts for HTML entity encoding (e.g., &lt; is 4 chars vs < is 1)
+	maxEntityExpansion := 6 * 4 // 6 special chars * ~4 chars per entity
+	searchEnd := canaryPos + len(smartCanary) + maxEntityExpansion
 	if searchEnd > len(body) {
 		searchEnd = len(body)
 	}
 
-	// Get snippet that should contain the reflection
 	snippet := body[canaryPos:searchEnd]
 
-	// CRITICAL FIX: Check for RAW characters, not HTML entities
-	// A character is "allowed" only if it appears in its literal form, not encoded
+	// Try to limit snippet to avoid HTML structure after the canary
+	// Look for the end of the base canary content
+	baseCanary := extractBaseCanary(smartCanary)
+	idx := strings.Index(snippet, baseCanary)
+	if idx != -1 {
+		// Analyze text AFTER the base canary
+		postCanary := snippet[idx+len(baseCanary):]
 
-	// Check < and > - must appear as literal chars, not &lt; or &gt;
-	hasLiteralLessThan := strings.Contains(snippet, "<")
-	hasEncodedLessThan := strings.Contains(snippet, "&lt;")
-	angleBracketsAllowed := hasLiteralLessThan && !hasEncodedLessThan && strings.Contains(snippet, ">") && !strings.Contains(snippet, "&gt;")
+		// 1. Check Angle Brackets (< and >)
+		// Find first occurrence of < or &lt;
+		idxLit := strings.Index(postCanary, "<")
+		idxEnc := strings.Index(postCanary, "&lt;")
 
-	// Check ' - must appear as literal, not &#39; or &apos;
-	hasLiteralSingleQuote := strings.Contains(snippet, "'")
-	hasEncodedSingleQuote := strings.Contains(snippet, "&#39;") || strings.Contains(snippet, "&apos;") || strings.Contains(snippet, "&#x27;")
-	singleQuoteAllowed := hasLiteralSingleQuote && !hasEncodedSingleQuote
+		if idxLit != -1 && (idxEnc == -1 || idxLit < idxEnc) {
+			// Literal < found first
+			angleBracketsAllowed = true
+		} else {
+			// Encoded or missing
+			angleBracketsAllowed = false
+		}
 
-	// Check " - must appear as literal, not &quot;
-	hasLiteralDoubleQuote := strings.Contains(snippet, "\"")
-	hasEncodedDoubleQuote := strings.Contains(snippet, "&quot;") || strings.Contains(snippet, "&#34;") || strings.Contains(snippet, "&#x22;")
-	doubleQuoteAllowed := hasLiteralDoubleQuote && !hasEncodedDoubleQuote
+		// 2. Check Single Quote (')
+		idxLit = strings.Index(postCanary, "'")
+		idxEnc = strings.Index(postCanary, "&#39;")
+		if idxEnc == -1 {
+			idxEnc = strings.Index(postCanary, "&apos;")
+		}
+		if idxEnc == -1 {
+			idxEnc = strings.Index(postCanary, "&#x27;")
+		}
+
+		if idxLit != -1 && (idxEnc == -1 || idxLit < idxEnc) {
+			singleQuoteAllowed = true
+		} else {
+			singleQuoteAllowed = false
+		}
+
+		// 3. Check Double Quote (")
+		idxLit = strings.Index(postCanary, "\"")
+		idxEnc = strings.Index(postCanary, "&quot;")
+		if idxEnc == -1 {
+			idxEnc = strings.Index(postCanary, "&#34;")
+		}
+		if idxEnc == -1 {
+			idxEnc = strings.Index(postCanary, "&#x22;")
+		}
+
+		if idxLit != -1 && (idxEnc == -1 || idxLit < idxEnc) {
+			doubleQuoteAllowed = true
+		} else {
+			doubleQuoteAllowed = false
+		}
+	} else {
+		// Fallback if base canary not found (unlikely)
+		// Use original logic but with strict checks (first occurrence wins)
+
+		// 1. Check Angle Brackets (< and >)
+		idxLit := strings.Index(snippet, "<")
+		idxEnc := strings.Index(snippet, "&lt;")
+		if idxLit != -1 && (idxEnc == -1 || idxLit < idxEnc) {
+			angleBracketsAllowed = true
+		} else {
+			angleBracketsAllowed = false
+		}
+
+		// 2. Check Single Quote (')
+		idxLit = strings.Index(snippet, "'")
+		idxEnc = strings.Index(snippet, "&#39;")
+		if idxEnc == -1 {
+			idxEnc = strings.Index(snippet, "&apos;")
+		}
+		if idxEnc == -1 {
+			idxEnc = strings.Index(snippet, "&#x27;")
+		}
+		if idxLit != -1 && (idxEnc == -1 || idxLit < idxEnc) {
+			singleQuoteAllowed = true
+		} else {
+			singleQuoteAllowed = false
+		}
+
+		// 3. Check Double Quote (")
+		idxLit = strings.Index(snippet, "\"")
+		idxEnc = strings.Index(snippet, "&quot;")
+		if idxEnc == -1 {
+			idxEnc = strings.Index(snippet, "&#34;")
+		}
+		if idxEnc == -1 {
+			idxEnc = strings.Index(snippet, "&#x22;")
+		}
+		if idxLit != -1 && (idxEnc == -1 || idxLit < idxEnc) {
+			doubleQuoteAllowed = true
+		} else {
+			doubleQuoteAllowed = false
+		}
+	}
 
 	// Determine blocked characters
 	blockedChars := ""

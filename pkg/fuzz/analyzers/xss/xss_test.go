@@ -236,3 +236,91 @@ func TestQuoteDetection(t *testing.T) {
 		}
 	}
 }
+
+// TestRobustnessEdges covers critical edge cases and regression scenarios
+// including escaped quote handling, filter detection with trailing HTML, and nested contexts.
+func TestRobustnessEdges(t *testing.T) {
+	// 1. JS Escaped Quote Handling (Regression)
+	t.Run("escaped_quote_handling", func(t *testing.T) {
+		// Scenario: Payload is inside a single-quoted string, but contains an escaped quote
+		// var x = 'escaped\'...';
+		// Logic should track escape state and know we are still inside the single quote string
+
+		input := "var x = 'escaped\\'"
+		// Offset is at end of string. Expected: ContextScriptStringSingle
+		ctx := analyzeJSContext(input, len(input))
+		if ctx != ContextScriptStringSingle {
+			t.Errorf("Expected ContextScriptStringSingle, got %v", ctx)
+		}
+	})
+
+	// 2. Filter Detection with Trailing HTML (Regression)
+	t.Run("filter_trailing_html", func(t *testing.T) {
+		smartCanary := "Nucl3iXY<>'"
+		baseCanary := "Nucl3iXY"
+
+		// HTML Encoded reflection followed by a structural tag that actually contains <
+		body := "<div>Nucl3iXY&lt;&gt;&apos;</div>"
+		canaryPos := strings.Index(body, baseCanary)
+
+		info := detectFilters(body, canaryPos, smartCanary)
+
+		if info.AngleBracketsAllowed {
+			t.Error("False Positive: Angle brackets marked allowed despite being encoded, likely due to trailing </div>")
+		}
+
+		if info.SingleQuoteAllowed {
+			t.Error("False Positive: Single quote marked allowed despite being encoded")
+		}
+	})
+
+	// 3. Filter Detection with Allowed HTML (Control)
+	t.Run("filter_allowed_control", func(t *testing.T) {
+		smartCanary := "Nucl3iXY<>'"
+		baseCanary := "Nucl3iXY"
+		body := "<div>Nucl3iXY<>'</div>"
+		canaryPos := strings.Index(body, baseCanary)
+
+		info := detectFilters(body, canaryPos, smartCanary)
+
+		if !info.AngleBracketsAllowed {
+			t.Error("False Negative: Angle brackets marked blocked but are present")
+		}
+	})
+
+	// 4. Extreme Context: Nested JS in HTML Attribute
+	t.Run("nested_js_in_html_attribute", func(t *testing.T) {
+		// <div onclick="var x = 'Nucl3iXY'">
+		// Tokenizer sees attribute value "var x = 'Nucl3iXY'"
+		// detectContextFromToken logic for attribute should detect it is an attribute
+
+		smartCanary := "Nucl3iXY"
+		body := `<div onclick="var x = 'Nucl3iXY'">`
+
+		// This uses DetectContextsRobust which calls the tokenizer loop
+		contexts := DetectContextsRobust(body, smartCanary)
+		if len(contexts) == 0 {
+			t.Fatal("Failed to detect context in nested JS attribute")
+		}
+
+		// Should be identified as Attribute Double Quoted because it's in the onclick="..." attribute
+		// Even though it's JS, the first breakout is the quote "
+		if contexts[0].Type != ContextHTMLAttrDoubleQuoted {
+			t.Errorf("Expected ContextHTMLAttrDoubleQuoted, got %s", contexts[0].Type)
+		}
+	})
+
+	// 5. Extreme Context: Complex Script with multiple quotes and escapes
+	t.Run("complex_script_structure", func(t *testing.T) {
+		// var a = "foo\"bar"; var b = 'baz\'qux' + `Nucl3iXY`;
+		smartCanary := "Nucl3iXY"
+		body := `var a = "foo\"bar"; var b = 'baz\'qux' + ` + "`" + smartCanary + "`" + `;`
+		canaryPos := strings.Index(body, smartCanary)
+
+		// We test analyzeJSContext specifically
+		ctx := analyzeJSContext(body, canaryPos)
+		if ctx != ContextScriptTemplateString {
+			t.Errorf("Expected ContextScriptTemplateString, got %s", ctx)
+		}
+	})
+}

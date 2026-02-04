@@ -89,8 +89,9 @@ func (a *Analyzer) Analyze(options *analyzers.Options) (bool, string, error) {
 		return false, "", errors.Wrap(err, "could not send probe request")
 	}
 
-	// Read response body
-	bodyBytes, err := io.ReadAll(resp.Body)
+	// Read response body with limit
+	const maxResponseBodySize = 10 * 1024 * 1024 // 10MB limit
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	resp.Body.Close()
 	if err != nil {
 		return false, "", errors.Wrap(err, "could not read response body")
@@ -116,42 +117,32 @@ func (a *Analyzer) Analyze(options *analyzers.Options) (bool, string, error) {
 	}
 
 	// Contexts are already sorted by how easy they are to exploit
-	mostExploitableCtx := contexts[0]
-	gologger.Verbose().Msgf("[%s] Most exploitable context: %s (rank %d)", a.Name(),
-		mostExploitableCtx.Type.String(), mostExploitableCtx.Type.ExploitabilityRank())
-
-	// Select the best payload for this context
-	payload := SelectPayload(mostExploitableCtx)
-	if payload == nil {
-		gologger.Verbose().Msgf("[%s] No viable payload found for context %s", a.Name(), mostExploitableCtx.Type.String())
-		return false, "", nil
-	}
-
-	gologger.Verbose().Msgf("[%s] Selected payload: %s", a.Name(), payload.Description)
-
-	// REQUEST 2: Send the targeted payload
-	matched, matchReason, err := a.sendTargetedPayload(options, payload, mostExploitableCtx)
-	if err != nil {
-		return false, "", err
-	}
-
-	if matched {
-		return true, matchReason, nil
-	}
-
-	// If first context didn't work, try other exploitable contexts
-	for i := 1; i < len(contexts) && i < 3; i++ {
+	// Try up to 3 contexts, starting with the most exploitable
+	for i := 0; i < len(contexts) && i < 3; i++ {
 		ctx := contexts[i]
-		payload = SelectPayload(ctx)
+
+		if i == 0 {
+			gologger.Verbose().Msgf("[%s] Most exploitable context: %s (rank %d)", a.Name(),
+				ctx.Type.String(), ctx.Type.ExploitabilityRank())
+		} else {
+			gologger.Verbose().Msgf("[%s] Trying fallback context: %s", a.Name(), ctx.Type.String())
+		}
+
+		// Select the best payload for this context
+		payload := SelectPayload(ctx)
 		if payload == nil {
+			gologger.Verbose().Msgf("[%s] No viable payload found for context %s", a.Name(), ctx.Type.String())
 			continue
 		}
 
-		gologger.Verbose().Msgf("[%s] Trying fallback context: %s", a.Name(), ctx.Type.String())
-		matched, matchReason, err = a.sendTargetedPayload(options, payload, ctx)
+		gologger.Verbose().Msgf("[%s] Selected payload: %s", a.Name(), payload.Description)
+
+		// Send the targeted payload
+		matched, matchReason, err := a.sendTargetedPayload(options, payload, ctx)
 		if err != nil {
 			return false, "", err
 		}
+
 		if matched {
 			return true, matchReason, nil
 		}
@@ -186,8 +177,9 @@ func (a *Analyzer) sendTargetedPayload(options *analyzers.Options, payload *XSSP
 		return false, "", errors.Wrap(err, "could not send request")
 	}
 
-	// Read response body
-	bodyBytes, err := io.ReadAll(resp.Body)
+	// Read response body with limit
+	const maxResponseBodySize = 10 * 1024 * 1024 // 10MB limit
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	resp.Body.Close()
 	if err != nil {
 		return false, "", errors.Wrap(err, "could not read response body")
