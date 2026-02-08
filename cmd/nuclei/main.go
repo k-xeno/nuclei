@@ -15,6 +15,7 @@ import (
 
 	"github.com/projectdiscovery/gologger"
 	_pdcp "github.com/projectdiscovery/nuclei/v3/internal/pdcp"
+	_ "github.com/projectdiscovery/nuclei/v3/pkg/fuzz/analyzers/xss"
 	"github.com/projectdiscovery/utils/auth/pdcp"
 	"github.com/projectdiscovery/utils/env"
 	_ "github.com/projectdiscovery/utils/pprof"

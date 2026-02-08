@@ -67,7 +67,7 @@ func randStringBytesMask(n int) string {
 // Strategy: send a probe first, see where it shows up, then send a targeted exploit
 func (a *Analyzer) Analyze(options *analyzers.Options) (bool, string, error) {
 	// Pull out the canary from the payload we built earlier
-	smartCanary := extractCanaryFromPayload(options.FuzzGenerated.OriginalPayload)
+	smartCanary := extractCanaryFromPayload(options.FuzzGenerated.Value)
 	if smartCanary == "" {
 		return false, "", errors.New("no XSS canary found in payload")
 	}
