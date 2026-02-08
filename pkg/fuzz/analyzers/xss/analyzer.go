@@ -17,21 +17,24 @@ type Analyzer struct{}
 var _ analyzers.Analyzer = &Analyzer{}
 
 const (
+	analyzerName        = "xss_context"
+	canaryPlaceholder   = "[XSS_CANARY]"
 	canaryPrefix        = "Nucl3i"
 	canaryRandomLen     = 6
 	canarySpecialChars  = "<>'\""
 	canarySpecialLen    = 4 // len(canarySpecialChars)
 	canaryTotalLen      = len(canaryPrefix) + canaryRandomLen + canarySpecialLen
 	maxResponseBodySize = 10 * 1024 * 1024 // 10MB limit
+	maxContextsToTry    = 3                // Maximum number of contexts to attempt exploitation
 )
 
 func init() {
-	analyzers.RegisterAnalyzer("xss_context", &Analyzer{})
+	analyzers.RegisterAnalyzer(analyzerName, &Analyzer{})
 }
 
 // Name returns the name of the analyzer
 func (a *Analyzer) Name() string {
-	return "xss_context"
+	return analyzerName
 }
 
 // ApplyInitialTransformation replaces [XSS_CANARY] with a special probe string
@@ -39,7 +42,7 @@ func (a *Analyzer) Name() string {
 func (a *Analyzer) ApplyInitialTransformation(data string, params map[string]interface{}) string {
 	// Create a unique probe with special chars to test what gets through
 	smartCanary := generateSmartCanary()
-	data = strings.ReplaceAll(data, "[XSS_CANARY]", smartCanary)
+	data = strings.ReplaceAll(data, canaryPlaceholder, smartCanary)
 
 	// Replace other placeholders like [RANDNUM]
 	data = analyzers.ApplyPayloadTransformations(data)
@@ -124,8 +127,8 @@ func (a *Analyzer) Analyze(options *analyzers.Options) (bool, string, error) {
 	}
 
 	// Contexts are already sorted by how easy they are to exploit
-	// Try up to 3 contexts, starting with the most exploitable
-	for i := 0; i < len(contexts) && i < 3; i++ {
+	// Try up to maxContextsToTry contexts, starting with the most exploitable
+	for i := 0; i < len(contexts) && i < maxContextsToTry; i++ {
 		ctx := contexts[i]
 
 		if i == 0 {
