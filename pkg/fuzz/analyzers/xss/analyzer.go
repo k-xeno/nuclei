@@ -7,7 +7,6 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/pkg/errors"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/nuclei/v3/pkg/fuzz/analyzers"
 )
@@ -16,6 +15,15 @@ import (
 type Analyzer struct{}
 
 var _ analyzers.Analyzer = &Analyzer{}
+
+const (
+	canaryPrefix        = "Nucl3i"
+	canaryRandomLen     = 6
+	canarySpecialChars  = "<>'\""
+	canarySpecialLen    = 4 // len(canarySpecialChars)
+	canaryTotalLen      = len(canaryPrefix) + canaryRandomLen + canarySpecialLen
+	maxResponseBodySize = 10 * 1024 * 1024 // 10MB limit
+)
 
 func init() {
 	analyzers.RegisterAnalyzer("xss_context", &Analyzer{})
@@ -42,9 +50,9 @@ func (a *Analyzer) ApplyInitialTransformation(data string, params map[string]int
 // generateSmartCanary creates a unique canary with embedded special chars
 // Format: "Nucl3iXXXXXX<>'\""  where XXXXXX is random
 func generateSmartCanary() string {
-	randStr := randStringBytesMask(6)
+	randStr := randStringBytesMask(canaryRandomLen)
 	// Include critical XSS characters for filter detection
-	return fmt.Sprintf("Nucl3i%s<>'\"", randStr)
+	return fmt.Sprintf("%s%s%s", canaryPrefix, randStr, canarySpecialChars)
 }
 
 // randStringBytesMask generates a random alphanumeric string of length n
@@ -69,7 +77,7 @@ func (a *Analyzer) Analyze(options *analyzers.Options) (bool, string, error) {
 	// Pull out the canary from the payload we built earlier
 	smartCanary := extractCanaryFromPayload(options.FuzzGenerated.Value)
 	if smartCanary == "" {
-		return false, "", errors.New("no XSS canary found in payload")
+		return false, "", fmt.Errorf("no XSS canary found in payload")
 	}
 
 	// STEP 1: Send the probe request
@@ -78,7 +86,7 @@ func (a *Analyzer) Analyze(options *analyzers.Options) (bool, string, error) {
 	// ApplyInitialTransformation already put the canary in, so just rebuild and send
 	rebuilt, err := gr.Component.Rebuild()
 	if err != nil {
-		return false, "", errors.Wrap(err, "could not rebuild request")
+		return false, "", fmt.Errorf("could not rebuild request: %w", err)
 	}
 
 	gologger.Verbose().Msgf("[%s] Sending probe with smart canary: %s", a.Name(), smartCanary)
@@ -86,15 +94,14 @@ func (a *Analyzer) Analyze(options *analyzers.Options) (bool, string, error) {
 	// Send the probe request
 	resp, err := options.HttpClient.Do(rebuilt)
 	if err != nil {
-		return false, "", errors.Wrap(err, "could not send probe request")
+		return false, "", fmt.Errorf("could not send probe request: %w", err)
 	}
+	defer resp.Body.Close()
 
 	// Read response body with limit
-	const maxResponseBodySize = 10 * 1024 * 1024 // 10MB limit
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
-	resp.Body.Close()
 	if err != nil {
-		return false, "", errors.Wrap(err, "could not read response body")
+		return false, "", fmt.Errorf("could not read response body: %w", err)
 	}
 	responseBody := string(bodyBytes)
 
@@ -160,13 +167,13 @@ func (a *Analyzer) sendTargetedPayload(options *analyzers.Options, payload *XSSP
 
 	// Set the payload value in the component
 	if err := gr.Component.SetValue(gr.Key, transformedPayload); err != nil {
-		return false, "", errors.Wrap(err, "could not set payload value in component")
+		return false, "", fmt.Errorf("could not set payload value in component: %w", err)
 	}
 
 	// Rebuild the request with the payload
 	rebuilt, err := gr.Component.Rebuild()
 	if err != nil {
-		return false, "", errors.Wrap(err, "could not rebuild request")
+		return false, "", fmt.Errorf("could not rebuild request: %w", err)
 	}
 
 	gologger.Verbose().Msgf("[%s] Sending payload: %s", a.Name(), payload.Value)
@@ -174,15 +181,14 @@ func (a *Analyzer) sendTargetedPayload(options *analyzers.Options, payload *XSSP
 	// Send the request
 	resp, err := options.HttpClient.Do(rebuilt)
 	if err != nil {
-		return false, "", errors.Wrap(err, "could not send request")
+		return false, "", fmt.Errorf("could not send request: %w", err)
 	}
+	defer resp.Body.Close()
 
 	// Read response body with limit
-	const maxResponseBodySize = 10 * 1024 * 1024 // 10MB limit
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
-	resp.Body.Close()
 	if err != nil {
-		return false, "", errors.Wrap(err, "could not read response body")
+		return false, "", fmt.Errorf("could not read response body: %w", err)
 	}
 	respBody := string(bodyBytes)
 
@@ -198,23 +204,21 @@ func (a *Analyzer) sendTargetedPayload(options *analyzers.Options, payload *XSSP
 }
 
 // extractCanaryFromPayload extracts the smart canary from the original payload
+// extractCanaryFromPayload extracts the smart canary from the payload
+// Returns empty string if canary is not found or is truncated
 func extractCanaryFromPayload(payload string) string {
-	// Look for the pattern "Nucl3i" followed by chars and special chars
-	if !strings.Contains(payload, "Nucl3i") {
-		return ""
-	}
-
 	// Find the start of the canary
-	start := strings.Index(payload, "Nucl3i")
+	start := strings.Index(payload, canaryPrefix)
 	if start == -1 {
 		return ""
 	}
 
-	// Extract canary (should include special chars at the end)
-	// Format: Nucl3iXXXXXX<>'\"
-	end := start + len("Nucl3i") + 6 + 4 // 6 random chars + 4 special chars (<>'")
+	// Calculate expected end position
+	// Format: Nucl3iXXXXXX<>'"
+	end := start + canaryTotalLen
 	if end > len(payload) {
-		end = len(payload)
+		// Payload is truncated, cannot extract valid canary
+		return ""
 	}
 
 	return payload[start:end]
