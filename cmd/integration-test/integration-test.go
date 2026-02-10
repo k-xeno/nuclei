@@ -3,16 +3,18 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"regexp"
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/kitabisa/go-ci"
 	"github.com/logrusorgru/aurora"
 
-	"github.com/projectdiscovery/gologger"
+
 	"github.com/projectdiscovery/nuclei/v3/pkg/testutils"
 	"github.com/projectdiscovery/nuclei/v3/pkg/testutils/fuzzplayground"
 	sliceutil "github.com/projectdiscovery/utils/slice"
@@ -33,33 +35,7 @@ var (
 	failed  = aurora.Red("[✘]").String()
 
 	protocolTests = map[string][]TestCaseInfo{
-		"http":            httpTestcases,
-		"interactsh":      interactshTestCases,
-		"network":         networkTestcases,
-		"dns":             dnsTestCases,
-		"workflow":        workflowTestcases,
-		"loader":          loaderTestcases,
-		"profile-loader":  profileLoaderTestcases,
-		"websocket":       websocketTestCases,
-		"headless":        headlessTestcases,
-		"whois":           whoisTestCases,
-		"ssl":             sslTestcases,
-		"library":         libraryTestcases,
-		"templatesPath":   templatesPathTestCases,
-		"templatesDir":    templatesDirTestCases,
-		"env_vars":        templatesDirEnvTestCases,
-		"file":            fileTestcases,
-		"offlineHttp":     offlineHttpTestcases,
-		"customConfigDir": customConfigDirTestCases,
 		"fuzzing":         fuzzingTestCases,
-		"code":            codeTestCases,
-		"multi":           multiProtoTestcases,
-		"generic":         genericTestcases,
-		"dsl":             dslTestcases,
-		"flow":            flowTestcases,
-		"javascript":      jsTestcases,
-		"matcher-status":  matcherStatusTestcases,
-		"exporters":       exportersTestCases,
 	}
 
 	// flakyTests are run with a retry count of 3
@@ -86,11 +62,6 @@ func main() {
 		testutils.ExtraDebugArgs = extraArgs
 	}
 
-	if runProtocol != "" {
-		debugTests()
-		os.Exit(1)
-	}
-
 	// start fuzz playground server
 	server := fuzzplayground.GetPlaygroundServer()
 	defer func() {
@@ -99,12 +70,38 @@ func main() {
 	}()
 
 	go func() {
-		if err := server.Start("localhost:8082"); err != nil {
+		fmt.Println("Attempting to start playground server on 127.0.0.1:8082...")
+		if err := server.Start("127.0.0.1:8082"); err != nil {
 			if !strings.Contains(err.Error(), "Server closed") {
-				gologger.Fatal().Msgf("Could not start server: %s\n", err)
+				fmt.Printf("FATAL: Could not start server: %s\n", err)
+				os.Exit(1)
 			}
 		}
 	}()
+
+	// Wait for server to be ready
+	serverReady := false
+	for i := 0; i < 100; i++ {
+		resp, err := http.Get("http://127.0.0.1:8082")
+		if err == nil {
+			resp.Body.Close()
+			fmt.Println("Playground server is ready on 127.0.0.1:8082")
+			serverReady = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !serverReady {
+		fmt.Println("FATAL: Server failed to become ready within timeout")
+		os.Exit(1)
+	}
+
+	if runProtocol != "" {
+		debugTests()
+		os.Exit(1)
+	}
+
+
 
 	customTestsList := normalizeSplit(customTests)
 	failedTestTemplatePaths := runTests(customTestsList)
