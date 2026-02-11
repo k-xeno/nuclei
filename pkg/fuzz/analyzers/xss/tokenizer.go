@@ -266,13 +266,7 @@ func analyzeJSContext(jsCode string, offset int) ContextType {
 	return ContextScriptCode
 }
 
-// detectAttributeQuoteContext detects the quote style of an attribute
-// NOTE: The html.Tokenizer doesn't preserve quote info, so we rely on
-// detectQuoteChar to refine this later using the body context
-func detectAttributeQuoteContext(attrValue string) ContextType {
-	// Default to double-quoted - will be refined by detectQuoteChar
-	return ContextHTMLAttrDoubleQuoted
-}
+
 
 // detectQuoteChar detects the quote character used in an attribute
 // It properly handles nested quotes (polyglots) by finding the OPENING quote

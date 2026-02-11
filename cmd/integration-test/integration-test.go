@@ -97,11 +97,11 @@ func main() {
 	}
 
 	if runProtocol != "" {
-		debugTests()
+		if debugTests() {
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
-
-
 
 	customTestsList := normalizeSplit(customTests)
 	failedTestTemplatePaths := runTests(customTestsList)
@@ -166,8 +166,9 @@ func executeWithRetry(testCase testutils.TestCase, templatePath string, retryCou
 	return templatePath, err
 }
 
-func debugTests() {
+func debugTests() bool {
 	testCaseInfos := protocolTests[runProtocol]
+	failed := false
 	for _, testCaseInfo := range testCaseInfos {
 		if (runTemplate != "" && !strings.Contains(testCaseInfo.Path, runTemplate)) ||
 			(testCaseInfo.DisableOn != nil && testCaseInfo.DisableOn()) {
@@ -176,13 +177,16 @@ func debugTests() {
 		if runProtocol == "interactsh" {
 			if _, err := executeWithRetry(testCaseInfo.TestCase, testCaseInfo.Path, interactshRetryCount); err != nil {
 				fmt.Printf("\n%v", err.Error())
+				failed = true
 			}
 		} else {
 			if _, err := execute(testCaseInfo.TestCase, testCaseInfo.Path); err != nil {
 				fmt.Printf("\n%v", err.Error())
+				failed = true
 			}
 		}
 	}
+	return !failed
 }
 
 func runTests(customTemplatePaths []string) []string {
